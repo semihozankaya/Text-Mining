@@ -27,7 +27,7 @@ This simple paper will try to explore basic patterns within the scripts of the f
 
 Unlike the familiar form of numerical or categorical data, we now have in our hands structured text which we will use to explore and see main properties of the scrip we have. Later on, we will conduct Latent Dirichlet allocation for unsupervised classification of our document into distinct topics tu better understand what we have. Finally, we will train a random forest to build a predictive model to understand if a given line belongs to a certain character. 
 ```{r}
-df <- read_csv("https://raw.githubusercontent.com/BobAdamsEE/SouthParkData/master/All-seasons.csv")
+df <- read_csv("https://raw.githubusercontent.com/semihozankaya/Text-Mining/master/Data/All-seasons.csv")
 ```
 
 ## Exploratory Analysis
