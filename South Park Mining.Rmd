@@ -183,9 +183,13 @@ Now it looks better. m'kay, woohoo or loo still doesn't make much sense but the 
 
 ## Bigrams
 
+So far, we have conducted our simple analyses taking a single word as our unit of measure. Even though it is a completely feasible method to take single words into consideration, it is also possible to look at the relationship between the words as well. We will do so by looking at the words that follows each other in our text, and form bigrams. 
+
+Below, you can see two graphs that shows exactly this relationships. The graphs are a replica of each other and only differ in formatting. They show the most occuring word pairs in our scripts. It gives us global warming, jesus christ and also holy shit. Faith hilling, peruvian flute bands, casa bonita and others would be rather familiar to people that have watched to show at least once. 
 
 
 ```{r}
+  
 bigrams <- df %>%
     unnest_tokens(bigram, Line, token = "ngrams", n = 2) %>%
     separate(bigram, c("word1", "word2"), sep = " ") %>%
@@ -218,3 +222,318 @@ ggraph(bigram_graph, layout = "fr") +
   theme_void()
 ```
 
+## Sentiment Analysis
+
+So far, we have investigated how often we see a certain word in our document as well as how often does a character speaks. We take a look which words stands out in comparison to others and what are their relationships with other words. We can now delve into sentiment analysis. We can, with the help of a sentiment lexicon, quantify the emotional content of a text. 
+
+I will use AFINN sentiment lexicon for our purposes here. It provides a numeric score that ranges from 5 to -5 for each word which I will weight and visualize at the end. The two bar graphs below are results of such an endeavour. The one on the left shows how "positive" a character is. The one on the right shows the words' contribution to overall sentiment of the text.
+
+It turns out that Jimmy is the most positive character we have on the show by some margin. Liane Cartman follows him with the only other person that has a positive sentiment. This is not actually surprising. Sheila Brofwlowski and the Announcer, aka the news reporter follows them with a rather neutral score. Kenny, Jimbo, Kyle and Mr. Garrison are the ones that have the lowest sentiment scores followed by the other loveable South Park characters.
+The words' contribution on the other hand is rather straightforward. Words such as love and wow contributed to the overall sentiment of the show whereas words like hell, ass and bitch drives the overall sentiment down.
+
+
+```{r}
+my_stop_words <- append(my_stop_words, c("no", "yes"), after = length(my_stop_words))
+
+
+sentiments <- Words %>% filter(!word %in% my_stop_words) %>%
+    inner_join(get_sentiments("afinn"), by = "word") %>%
+    group_by(Character) %>%
+    summarize(score = sum(value * n) / sum(n)) 
+
+top20_chars <- head(top_chars, 20)$Character
+
+sentiments <- sentiments %>% filter(Character %in% top20_chars)
+sentiments <- sentiments %>% arrange(-score)
+
+## Sentiments by words
+
+contributions <- df %>%
+  unnest_tokens(word, Line) %>% filter(!word %in% my_stop_words) %>%
+  count(Character, word, sort = TRUE) %>%
+  ungroup() %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%
+  group_by(word) %>%
+  summarize(occurences = n(),
+            contribution = sum(value))
+
+
+```
+
+```{r, out.width= '50%'}
+sentiments %>%
+    mutate(Name = reorder(Character, score)) %>%
+    ggplot(aes(Name, score, fill = score > 0)) +
+    geom_col(show.legend = TRUE) +
+    coord_flip() +
+    ylab("Average sentiment score") + theme_bw()
+
+
+contributions %>%
+  top_n(20, abs(contribution)) %>%
+  mutate(word = reorder(word, contribution)) %>%
+  ggplot(aes(word, contribution, fill = contribution > 0)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() + theme_bw()
+
+```
+
+## Topic and Predictive Modeling
+
+After our exploratory analysis of the text we have and the simple tf-idf measure and the sentiment analysis we have checked, we can now try to implement some (un)supervised learning on our data. To this end, I will start with topic modeling using Latent Dirichlet allocation to see if we can split our text into 2 distinct topic groups. Later on, I will build a model where I will try to predict if a given text belongs to Cartman first and also to Stan later as well. 
+
+I first start with LDA as promised. Topic modeling, similar to clustering will try to find unspervised patterns in our text and I have tried to split our text into two accordingly. After some clearing and adjustments on the data, we can see that two separate groups can be found in our text as can be seen below. The split doesn't seem to offer much insight and more likely to reflect positive and negative sentiments in the given text. The first group seems to be more "cautious" whereas the other offers a more assertive tone but overall, the split is hardly intiutive.
+
+```{r}
+
+mydf <- df %>%
+  select(Character,Line)
+
+corpus_lda <- Corpus(VectorSource(mydf$Line))
+
+LowIDF <- WordsFull %>%
+  arrange((idf)) %>%
+  select(word,idf)
+
+Low_IDF <- unique(LowIDF$word)
+
+corpus_lda <- tm_map(corpus_lda, tolower)
+corpus_lda <- tm_map(corpus_lda, removePunctuation)
+corpus_lda <- tm_map(corpus_lda, removeWords, stopwords("english"))
+corpus_lda <- tm_map(corpus_lda, removeWords, Low_IDF[1:50])
+corpus_lda <- tm_map(corpus_lda, stemDocument)
+
+
+dtm_lda <- DocumentTermMatrix(corpus_lda)
+
+# Remove sparse terms
+
+dtm_lda <- removeSparseTerms(dtm_lda, 0.997)
+
+# Create data frame
+
+labeledTerms_lda <- as.data.frame(as.matrix(dtm_lda))
+labeledTerms_lda <- labeledTerms_lda[rowSums(abs(labeledTerms_lda)) != 0,]
+
+spark_lda <- LDA(labeledTerms_lda, k = 2, control = list(seed = 09052021))
+
+spark_topics <- tidy(spark_lda, matrix = "beta")
+
+spark_top_terms <- spark_topics %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+```
+
+```{r}
+spark_top_terms %>%
+  mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip() + theme_bw()
+```
+
+
+```{r}
+##### predictive modeling
+
+corpus_cartman <- Corpus(VectorSource(df$Line))
+
+# Pre-process data
+
+corpus_cartman <- tm_map(corpus_cartman, tolower)
+corpus_cartman <- tm_map(corpus_cartman, removePunctuation)
+corpus_cartman <- tm_map(corpus_cartman, removeWords, stopwords("english"))
+corpus_cartman <- tm_map(corpus_cartman, stemDocument)
+dtm_cartman <- DocumentTermMatrix(corpus_cartman)
+
+# Remove sparse terms
+
+dtm_cartman <- removeSparseTerms(dtm_cartman, 0.997)
+
+
+# Create data frame
+
+labeledTerms_cartman <- as.data.frame(as.matrix(dtm_cartman))
+
+my_df <- df %>%
+  mutate(is_Cartman = 0)
+
+my_df <- my_df %>%
+  mutate(is_Cartman=replace(is_Cartman, Character == 'Cartman', 1)) %>%
+  as.data.frame()
+
+
+
+labeledTerms_cartman$is_Cartman = as.factor(my_df$is_Cartman)
+
+## Preparing the features for the XGBoost Model
+
+features <- colnames(labeledTerms_cartman)
+
+
+
+for (f in features) {
+  
+  if ((class(labeledTerms_cartman[[f]])=="factor") || (class(labeledTerms_cartman[[f]])=="character")) {
+    levels <- unique(labeledTerms_cartman[[f]])
+    labeledTerms_cartman[[f]] <- as.numeric(factor(labeledTerms_cartman[[f]], levels=levels))
+  }
+  
+}
+
+## Creating our predictive model
+
+labeledTerms_cartman$is_Cartman = as.factor(labeledTerms_cartman$is_Cartman)
+
+
+h2o_data_cartman <- as.h2o(labeledTerms_cartman)
+splitted_data <- h2o.splitFrame(h2o_data_cartman, ratios = c(0.2), seed = 20210905)
+
+data_train_cartman <- splitted_data[[1]]
+data_test_cartman <- splitted_data[[2]]
+
+y_cartman <- "is_Cartman"
+X_cartman <- setdiff(names(h2o_data_cartman), c(y_cartman))
+
+# For modeling
+foresting_params_cartman <- list(
+  ntrees = c(10, 25), 
+  mtries = c(10, 15), 
+  sample_rate = c(0.2),
+  max_depth = c(10, 20)
+)
+
+forester_grid_cartman <- h2o.grid(
+  "randomForest", x = X_cartman, y = y_cartman,
+  training_frame = data_train_cartman,
+  grid_id = "forester_cartman",
+  nfolds = 5,
+  seed = 20210905,
+  hyper_params = foresting_params_cartman
+)
+best_forest_cartman <- h2o.getModel(
+  h2o.getGrid(forester_grid_cartman@grid_id, "auc")@model_ids[[sum(lengths(h2o.getGrid(forester_grid_cartman@grid_id, "auc")@model_ids))]]
+)
+
+
+## Lets do Stan
+
+
+corpus <- Corpus(VectorSource(df$Line))
+
+# Pre-process data
+
+corpus <- tm_map(corpus, tolower)
+corpus <- tm_map(corpus, removePunctuation)
+corpus <- tm_map(corpus, removeWords, stopwords("english"))
+corpus <- tm_map(corpus, stemDocument)
+dtm <- DocumentTermMatrix(corpus)
+
+# Remove sparse terms
+
+dtm <- removeSparseTerms(dtm, 0.997)
+
+
+# Create data frame
+
+labeledTerms <- as.data.frame(as.matrix(dtm))
+
+my_df <- df %>%
+  mutate(is_Stan = 0)
+
+my_df <- my_df %>%
+  mutate(is_Stan =replace(is_Stan, Character == 'Stan', 1)) %>%
+  as.data.frame()
+
+
+
+labeledTerms$is_Stan = as.factor(my_df$is_Stan)
+
+## Preparing the features for our model
+
+features <- colnames(labeledTerms)
+
+
+
+for (f in features) {
+  
+  if ((class(labeledTerms[[f]])=="factor") || (class(labeledTerms[[f]])=="character")) {
+    levels <- unique(labeledTerms[[f]])
+    labeledTerms[[f]] <- as.numeric(factor(labeledTerms[[f]], levels=levels))
+  }
+  
+}
+
+## Creating the Model
+
+labeledTerms$is_Stan = as.factor(labeledTerms$is_Stan)
+
+
+
+h2o_data <- as.h2o(labeledTerms)
+splitted_data <- h2o.splitFrame(h2o_data, ratios = c(0.2), seed = 20210905)
+
+data_train <- splitted_data[[1]]
+data_test <- splitted_data[[2]]
+
+y <- "is_Stan"
+X <- setdiff(names(h2o_data), c(y))
+
+# For modeling
+foresting_params <- list(
+  ntrees = c(10, 25), 
+  mtries = c(10, 15), 
+  sample_rate = c(0.2),
+  max_depth = c(10, 20)
+)
+
+forester_grid_stan <- h2o.grid(
+  "randomForest", x = X, y = y,
+  training_frame = splitted_data[[1]],
+  grid_id = "forester_stan",
+  nfolds = 5,
+  seed = 20210905,
+  hyper_params = foresting_params
+)
+best_forest_stan <- h2o.getModel(
+  h2o.getGrid(forester_grid_stan@grid_id, "auc")@model_ids[[sum(lengths(h2o.getGrid(forester_grid_stan@grid_id, "auc")@model_ids))]]
+)
+
+
+h2o.auc(h2o.performance(best_forest_stan))
+h2o.auc(h2o.performance(best_forest_stan, data_test))
+
+
+h2o.auc(h2o.performance(best_forest_cartman))
+h2o.auc(h2o.performance(best_forest_cartman, data_test_cartman))
+
+
+```
+
+We now continute with our predictive modeling and try to find words that best describes its speaker. In other words, we will try to predict the speaker by looking at the lines. In order to that, I have trained a medium sized random forest and at the end, achieved 'fair' results. Below, you can see the ROC plots for two different predictions. The one on the left shows our prediction for Cartman where the training AUC measure is `r 
+h2o.auc(h2o.performance(best_forest_cartman))` and the test AUC is `r h2o.auc(h2o.performance(best_forest_cartman, data_test_cartman))`. On the other hand, the graph on the right shows the same for our prediction for Stan where its training AUC is `r h2o.auc(h2o.performance(best_forest_stan))` and the test measure is `r h2o.auc(h2o.performance(best_forest_stan, data_test))`. These are not terrible results and shows promise.
+
+Following these ROC plots, we can also see the variable importance plots below them for both of the predictions. This is more interesting, at least for me, since it offers a chance to test our results as mere watchers of the show. We can see that the relative variable importance for Cartman are somewhat familiar. The same is hard to say for Stan but in any case, our model is not the best and even though it succeeds more than it fails, its false positive and negative counts are rather high.
+
+```{r, out.width= '50%'}
+plot(h2o.performance(best_forest_cartman, xval = TRUE), type = "roc")
+
+plot(h2o.performance(best_forest_stan, xval = TRUE), type = "roc")
+
+```
+
+
+```{r, out.width= '50%'}
+h2o.varimp_plot(best_forest_cartman)
+
+h2o.varimp_plot(best_forest_stan)
+
+
+```
+
+## Summary
+
+All in all, we have tried to explore the scripts of South Park from its very first episode to the last episode of the 18th season. It was first and foremost fun to do so but it could also be taught of being rather informative. We first plotted the mostly used words and the most active characters in the show. This will definitely give some insight about the show to people that haven't watched it before. We then continue with creating a tf-idf measure for every word and check the measures for the most active characters of the show. This is also another good measure to understand the role of each character in the show. We also checked the sentiment of the overall lines of a given character as well as the the words that contributed to this overall sentiment. The remaining topic and predictive modeling gave further insight to us and overall, it can be argued that our analysis provides a good understanding of the show itself.
