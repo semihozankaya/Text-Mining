@@ -1,0 +1,220 @@
+---
+title: "Text Mining - South Park"
+author: "Ozan Kaya"
+date: "May 9, 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, comment= FALSE, warning=FALSE, message = FALSE, results = "hide")
+library(tidyverse)
+library(tidytext)
+library(stringr)
+library(DT)
+library(igraph)
+library(ggraph)
+library(topicmodels)
+library(tm)
+library(wordcloud)
+library(h2o)
+library(textdata)
+h2o.init()
+```
+
+## Introduction
+
+This simple paper will try to explore basic patterns within the scripts of the famous tv show, South Park. More information on the show can be found [here](https://www.imdb.com/title/tt0121955/?ref_=nv_sr_srsg_0). The scripts include all the spoken text in the show, starting from the first episode and ranges to the last episode of the 18th season. We are able to conduct analysis thanks to Bob Adams courtesy and can be found in his github repository, [here](https://raw.githubusercontent.com/BobAdamsEE/SouthParkData/master/All-seasons.csv). 
+
+Unlike the familiar form of numerical or categorical data, we now have in our hands structured text which we will use to explore and see main properties of the scrip we have. Later on, we will conduct Latent Dirichlet allocation for unsupervised classification of our document into distinct topics tu better understand what we have. Finally, we will train a random forest to build a predictive model to understand if a given line belongs to a certain character. 
+```{r}
+df <- read_csv("https://raw.githubusercontent.com/BobAdamsEE/SouthParkData/master/All-seasons.csv")
+```
+
+## Exploratory Analysis
+
+We will start with figuring out the 10 most active characters in terms of the number of lines associated to them along with the 20 most spoken words on the series. The results can be seen at the below bar graphs where Eric Cartman is by far the most actice character in our group, followed by Stan and Kyle. Butters and Randy, not surprisingly, comes at 4th and 5th place with very similar amount of spoken lines. Kenny, the silent character that he is, follows the rest with only 881 lines and stands at 8th most active character in the series. 
+
+Similarly, after removing certain stop words from the list, we can also see the most spoken words on the series along with a wordcloud presented below. People comes first, mostly as a way of addressing groups of people but also for distinguishing crab and sea people that takes place in the series. Most of the active character's names appear on the list along with god, hell and time (sounds like an existential masterpiece already). 
+
+
+```{r}
+
+my_stop_words <- stop_words$word
+my_stop_words <- append(my_stop_words, c("yeah", "gonna", "uh", "hey", "huh"), after = length(my_stop_words))
+
+
+top_chars <- df %>% group_by(Character) %>% tally(sort = TRUE)
+
+## Top words
+top_words <- df %>%
+  unnest_tokens(word, Line) %>%
+  filter(!word %in% my_stop_words) %>%
+  count(word,sort = TRUE) %>%
+  ungroup() %>%
+  mutate(Word = factor(word, levels = rev(unique(word)))) %>% select(Word, Count = n)
+```
+
+```{r, out.width='50%'}
+## Most active characters
+ggplot(head(top_chars,10), aes(x = reorder(Character, n), y = n)) +
+  geom_bar(stat='identity',colour="white", fill = "#e6550d") +
+  geom_text(aes(x = Character, y = 1, label = paste0("(",n,")",sep="")),
+  hjust=0, vjust=.5, size = 4, colour = 'black',
+  fontface = 'bold') +
+  labs(x = 'Character', y = 'Line Count') +
+  coord_flip() + 
+  theme_bw()
+
+ggplot(head(top_words, 20), aes(x = Word,y = Count)) +
+  geom_bar(stat='identity',colour="white", fill = "#e6550d") +
+  geom_text(aes(x = Word, y = 1, label = paste0("(",Count,")",sep="")),
+  hjust=0, vjust=.5, size = 4, colour = 'black',
+  fontface = 'bold') +
+  labs(x = 'Word', y = 'Word Count') + 
+  coord_flip() + 
+  theme_bw()
+
+```
+
+```{r}
+top_words %>% head(100) %>%
+  with(wordcloud(Word, Count, max.words = 100,colors=brewer.pal(8, "Dark2")))
+```
+
+## TF IDF
+
+Even though understanding the most occuring sentences and/or most active characters in a given text is certainly fun, it would be infinitely better if we could do more with the data we have in our hands. Ultimately, we might be interested in quantifying what actually the document is about. One way to do it is to quantify how important a single word is and that can be done with measuring its term frequency (TF). Another approach is the measure the words' inverse document frequency (IDF) which basically works with decreasing the weight for commonly used words and increasing the weight for words that are not used very much in a collection of documents. 
+
+```{r}
+#Get the Top 20 Characters
+top10_chars <- head(top_chars, 10)$Character
+
+Words <- df %>%
+  unnest_tokens(word, Line) %>%
+  count(Character, word, sort = TRUE) %>%
+  ungroup()
+
+Words[which(Words$word == "mkay"), 2] <- "m'kay"
+Words[which(Words$word == "hm'kay"), 2] <- "m'kay"
+Words[which(Words$word == "uhkay"), 2] <- "m'kay"
+
+total_words <- Words %>% 
+  group_by(Character) %>% 
+  summarize(total = sum(n))
+  
+Words <- left_join(Words, total_words)
+
+WordsFull <- Words %>%
+  filter(!is.na(Character)) %>%
+  bind_tf_idf(word, Character, n)
+
+Words_top10 <- Words %>% filter( Character %in% top10_chars) %>%
+  bind_tf_idf(word, Character, n)
+
+plot_td_idf <- Words_top10 %>%
+  arrange(desc(tf_idf)) %>%
+  mutate(word = factor(word, levels = rev(unique(word))))
+```
+
+```{r}
+plot_td_idf %>% 
+  top_n(15) %>%
+  ggplot(aes(word, tf_idf, fill = Character)) +
+  geom_col() +
+  labs(x = NULL, y = "tf-idf") +
+  coord_flip() + scale_fill_brewer(type = "qual") + 
+  theme_bw()
+
+```
+
+There seems to be a problem with Kenny's lines. When taking a better look, we can see that some of the words are coming from the episode 'Titties and Dragons' where Kenny plays an anime princess and helps Sony win a war against Microsoft. The sentences doesn't make much sense and all consist of made up words.  They are quite repetitive and make the td-idf measures get misleading results. 
+
+Words like quack, te and io is also misleading. io and te comes from a spanish-like singing he makes at 4th season episode 3. quack is a repetitive word from the sentence quack-quack. This is misleading as well. Let's add them to our stop word lists so that we can have more insightfull results.
+
+```{r}
+
+mydata <- df %>% filter(Character == "Kenny")
+kennys_stop_words <- filter(df, Character == 'Kenny')[which(grepl("Kenni", mydata$Line)),] %>% 
+  unnest_tokens(word, Line) %>% select(word)
+
+my_stop_words <- append(my_stop_words, kennys_stop_words[[1]], after = length(my_stop_words))
+my_stop_words <- append(my_stop_words, c("quack", "io","te"), after = length(my_stop_words))
+
+
+
+Words <- df %>%
+  unnest_tokens(word, Line) %>% filter(!word %in% my_stop_words) %>%
+  count(Character, word, sort = TRUE) %>%
+  ungroup()
+
+Words[which(Words$word == "mkay"), 2] <- "m'kay"
+Words[which(Words$word == "hm'kay"), 2] <- "m'kay"
+Words[which(Words$word == "uhkay"), 2] <- "m'kay"
+
+total_words <- Words %>% 
+  group_by(Character) %>% 
+  summarize(total = sum(n))
+
+Words <- left_join(Words, total_words)
+
+WordsFull <- Words %>%
+  filter(!is.na(Character)) %>%
+  bind_tf_idf(word, Character, n)
+
+Words_top10 <- Words %>% filter( Character %in% top10_chars) %>%
+  bind_tf_idf(word, Character, n)
+
+plot_td_idf <- Words_top10 %>%
+  arrange(desc(tf_idf)) %>%
+  mutate(word = factor(word, levels = rev(unique(word))))
+```
+
+```{r}
+plot_td_idf %>% 
+  top_n(15) %>%
+  ggplot(aes(word, tf_idf, fill = Character)) +
+  geom_col() +
+  labs(x = NULL, y = "tf-idf") +
+  coord_flip() + scale_fill_brewer(type = "qual") + 
+  theme_bw()
+```
+
+Now it looks better. m'kay, woohoo or loo still doesn't make much sense but the characters are well known for these lines so I decided not to adjust them. Same goes for the names, i.e. Sharon, Stanley and Randy. Sharon and Randy seems to communicate with each other by addressing their names first. 
+
+## Bigrams
+
+
+
+```{r}
+bigrams <- df %>%
+    unnest_tokens(bigram, Line, token = "ngrams", n = 2) %>%
+    separate(bigram, c("word1", "word2"), sep = " ") %>%
+    filter(!word1 %in% my_stop_words,
+           !word2 %in% my_stop_words) %>%
+    count(word1, word2, sort = TRUE)
+  
+bigrams <- bigrams %>% filter(word1 != word2)
+
+
+bigram_graph <- bigrams %>%
+  filter(n > 25) %>%
+  graph_from_data_frame()
+
+set.seed(09052021)
+```
+
+```{r, out.width= '50%'}
+ggraph(bigram_graph, layout = "fr") +
+  geom_edge_link() +
+  geom_node_point() +
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1)
+
+a <- grid::arrow(type = "closed", length = unit(.15, "inches"))
+ggraph(bigram_graph, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = n), show.legend = FALSE,
+                 arrow = a, end_cap = circle(.07, 'inches')) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
